@@ -1,0 +1,20 @@
+# SO / editores
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Entornos / dependencias
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Temporales de trabajo (NO la fuente ni el GTFS final)
+*.tmp
+*.log
+scratch/
+data/osm/*.tmp
+
+# La fuente (data/source/) y el GTFS final (data/gtfs/) SI se versionan.
