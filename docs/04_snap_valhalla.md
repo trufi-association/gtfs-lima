@@ -56,9 +56,20 @@ reconoció la calle real *"Avenida Óscar Raimundo Benavides"* — justo el corr
   giros que el routing automático no adivina).
 - Para rutas con trazado roto/faltante en el KML, el recorrido se reconstruye **desde las paradas**.
 
+## Estado
+
+- [x] **`scripts/snap_valhalla.py`** — por ruta+sentido, paradas en orden → `/route` +
+      `/trace_attributes` → `data/osm/shapes_snapped.geojson` (geometría + `osm_way_ids` + `osm_streets`).
+      Uso: `VALHALLA_URL=… python3 scripts/snap_valhalla.py [REF]`.
+- [x] **Probado con R-9605 URBANITO**: 47 paradas → 16.9 km, 540 puntos, 146 ways OSM.
+      Validación contra el KML: desviación **mediana 16 m** (sigue el recorrido), **p90 1275 m**
+      (un tramo al oeste donde Valhalla difiere — a revisar a mano). Ver `img/urbanito-snap.jpeg`.
+
+![URBANITO: KML vs snapped](img/urbanito-snap.jpeg)
+
 ## Próximo
 
-- [ ] `scripts/snap_valhalla.py`: por ruta+sentido, paradas en orden → `/route` + `/trace_attributes`
-      → `data/osm/shapes_snapped.geojson` (geometría) + `way_ids` por ruta.
+- [ ] Correr el resto de rutas; revisar a mano los tramos con desviación alta (p90).
 - [ ] Resolver el sentido de las paradas donde no es explícito (solo LA 50 lo trae) — asignación por
-      proximidad al trazado, en la Fase 3 (OSM).
+      proximidad al trazado, en la Fase 3 (OSM). Para rutas multi-sentido sin `direction`
+      (NUEVA AMERICA, ETUCHISA) el snap actual mezcla sentidos: separar antes de snappear.
