@@ -24,11 +24,12 @@ conversores maduros.
 ### Fase 0 — Análisis (✅ hecho)
 - [x] Inventariar capas, geometrías, atributos, calidad → `docs/00_analisis_kml.md`.
 
-### Fase 1 — Normalización del KML
-- [ ] Corregir encoding (mojibake doble-UTF8) en los 53 nombres afectados.
-- [ ] Mapear los 5 esquemas de `ExtendedData` a un modelo único: `route_id`, `route_name`, `stop_id`, `stop_name`, `stop_seq`, `direction`, `lat`, `lon`.
-- [ ] Separar por ruta y sentido; inferir sentido donde no es explícito.
-- [ ] Exportar a GeoJSON limpio en `data/osm/`.
+### Fase 1 — Normalización del KML (✅ hecho — `scripts/normalize.py`, ver `02_normalizacion.md`)
+- [x] Corregir encoding (mojibake doble-UTF8) en los 53 nombres afectados.
+- [x] Mapear los 5 esquemas de `ExtendedData` a un modelo único: `route_ref`, `route_name`, `stop_id`, `stop_name`, `stop_seq`, `direction`, `lat`, `lon`.
+- [x] Separar por ruta; `stop_id` únicos garantizados.
+- [x] Exportar a GeoJSON limpio en `data/osm/`.
+- [~] Inferir sentido donde no es explícito → se hará por proximidad al trazado en Fase 3.
 
 ### Fase 2 — Resolver vacíos con el cliente
 - [ ] Aclarar las **4 rutas del alcance** (vs. 6 entregadas).

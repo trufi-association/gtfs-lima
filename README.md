@@ -20,8 +20,10 @@ gtfs_lima/
 │   └── gtfs/                 ← feed GTFS generado (salida)
 ├── docs/
 │   ├── 00_analisis_kml.md    ← análisis del KML fuente
-│   └── 01_pipeline.md        ← plan de trabajo KML → OSM → GTFS
-└── scripts/                  ← scripts de conversión y validación
+│   ├── 01_pipeline.md        ← plan de trabajo KML → OSM → GTFS
+│   └── 02_normalizacion.md   ← resultado de la Fase 1
+└── scripts/
+    └── normalize.py          ← Fase 1: KML → modelo único (GeoJSON/CSV)
 ```
 
 ## Estado
@@ -29,7 +31,7 @@ gtfs_lima/
 | Fase | Estado |
 |---|---|
 | 0 · Análisis del KML | ✅ Completo |
-| 1 · Normalización | ⬜ Pendiente |
+| 1 · Normalización | ✅ Completo — ver `docs/02_normalizacion.md` |
 | 2 · Resolver vacíos con cliente | ⬜ Pendiente |
 | 3 · Mapeo en OSM | ⬜ Pendiente |
 | 4 · Generación GTFS | ⬜ Pendiente |
