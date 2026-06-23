@@ -23,7 +23,9 @@ gtfs_lima/
 │   ├── 01_pipeline.md        ← plan de trabajo KML → OSM → GTFS
 │   ├── 02_normalizacion.md   ← resultado de la Fase 1
 │   ├── 03_evaluacion_editor_gtfs.md  ← tp-routes vs GTFS·X vs alternativas + recomendación
+│   ├── 04_snap_valhalla.md   ← Fase 2.5: snap-to-roads con Valhalla
 │   └── img/                  ← evidencia (capturas de la prueba en vivo de GTFS·X)
+├── .env.example              ← VALHALLA_URL (servicio de routing/snap)
 └── scripts/
     └── normalize.py          ← Fase 1: KML → modelo único (GeoJSON/CSV)
 ```
@@ -35,6 +37,7 @@ gtfs_lima/
 | 0 · Análisis del KML | ✅ Completo |
 | 1 · Normalización | ✅ Completo — ver `docs/02_normalizacion.md` |
 | 2 · Resolver vacíos con cliente | ⬜ Pendiente |
+| 2.5 · Snap-to-roads (Valhalla) | 🟡 Infra lista (Lima cargada en Valhalla) — falta `scripts/snap_valhalla.py` · ver `docs/04` |
 | 3 · Mapeo en OSM | ⬜ Pendiente |
 | 4 · Generación GTFS | ⬜ Pendiente |
 

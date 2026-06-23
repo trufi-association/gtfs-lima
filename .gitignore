@@ -18,3 +18,6 @@ scratch/
 data/osm/*.tmp
 
 # La fuente (data/source/) y el GTFS final (data/gtfs/) SI se versionan.
+
+# secretos locales
+.env
