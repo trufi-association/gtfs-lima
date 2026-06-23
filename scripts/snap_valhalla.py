@@ -1,113 +1,166 @@
 #!/usr/bin/env python3
 """
-Fase 2.5 — Snap-to-roads con Valhalla.
+Fase 2.5 — Snap-to-roads con Valhalla (enfoque map-match).
 
-Toma las paradas normalizadas (data/osm/stops.geojson), y por cada ruta+sentido:
-  1. /route          → trazado siguiendo las calles reales entre las paradas (en orden).
-  2. /trace_attributes (map_snap) → way_id + nombres de calle de OpenStreetMap.
-Escribe data/osm/shapes_snapped.geojson (LineStrings limpios + metadatos).
+Para cada TRAZADO del KML (data/osm/shapes.geojson) hace **map-matching** contra las
+calles reales de OSM (`/trace_route`, costing bus → auto), obteniendo geometría limpia
+pegada a la calle SIN inventar rodeos. Luego `/trace_attributes` para los `way_id` de OSM.
 
-Usa el mismo motor que tp-routes/BusBoy (VALHALLA_URL). No depende de Mapbox.
-Receta portada de tp-routes/js/valhalla.js.
+Por qué map-match del trazado y no routing entre paradas:
+  - Sigue la FORMA dibujada en el KML (no toma atajos de carro ni hace vueltas en U).
+  - Cada LineString del KML ya es un SENTIDO → resuelve ida/vuelta sin depender del
+    campo `direction` de las paradas (que solo traía LA 50).
+Si un trazado es demasiado corto/roto (p. ej. fragmentos de ETUCHISA), cae a routing por
+las paradas de esa ruta como respaldo, y se marca para revisión manual.
+
+Salida: data/osm/shapes_snapped.geojson (un LineString por trazado + metadatos).
 
 Uso:
-  python3 scripts/snap_valhalla.py            # todas las rutas
-  python3 scripts/snap_valhalla.py R-9605     # solo una ruta (ref)
+  VALHALLA_URL=… python3 scripts/snap_valhalla.py            # todas
+  VALHALLA_URL=… python3 scripts/snap_valhalla.py R-9605     # una ruta
 """
 import json
+import math
 import os
 import sys
-import time
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "https://valhalla.busboy.app")
+SHAPES = Path("data/osm/shapes.geojson")
 STOPS = Path("data/osm/stops.geojson")
 OUT = Path("data/osm/shapes_snapped.geojson")
-MAX_LOC = 20            # trocear /route en chunks (límite conservador, como tp-routes)
-COSTING = "auto"        # respeta sentidos de calle; Valhalla también tiene 'bus'
+COSTINGS = ("bus", "auto")     # preferir bus; si el server no lo soporta, auto
+MIN_VERTS = 8                   # trazado más corto que esto → respaldo por paradas
 
 
-# ---------- polilínea Valhalla (precisión 6) ----------
-def decode_polyline(encoded, precision=6):
+def post(path, payload):
+    req = urllib.request.Request(f"{VALHALLA_URL}{path}",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return json.load(e)
+        except Exception:
+            return {"error": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def decode_polyline(enc, precision=6):
     inv = 1.0 / (10 ** precision)
-    coords, lat, lon, i = [], 0, 0, 0
-    while i < len(encoded):
+    out, lat, lon, i = [], 0, 0, 0
+    while i < len(enc):
         for axis in (0, 1):
-            shift = result = 0
+            shift = res = 0
             while True:
-                b = ord(encoded[i]) - 63
+                b = ord(enc[i]) - 63
                 i += 1
-                result |= (b & 0x1f) << shift
+                res |= (b & 0x1f) << shift
                 shift += 5
                 if b < 0x20:
                     break
-            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            d = ~(res >> 1) if (res & 1) else (res >> 1)
             if axis == 0:
                 lat += d
             else:
                 lon += d
-        coords.append([round(lon * inv, 6), round(lat * inv, 6)])  # [lon,lat]
-    return coords
+        out.append([round(lon * inv, 6), round(lat * inv, 6)])
+    return out
 
 
-def post(path, payload, retries=3):
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(f"{VALHALLA_URL}{path}", data=data,
-                                 headers={"Content-Type": "application/json"})
-    for attempt in range(retries):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            try:
-                return json.load(e)         # Valhalla devuelve JSON de error con 400
-            except Exception:
-                if attempt == retries - 1:
-                    return {"error": f"HTTP {e.code}"}
-        except Exception as e:
-            if attempt == retries - 1:
-                return {"error": str(e)}
-            time.sleep(1.5)
+def legs_to_coords(trip):
+    coords = []
+    for leg in trip["legs"]:
+        dec = decode_polyline(leg["shape"])
+        if coords:
+            dec = dec[1:]
+        coords += dec
+    return coords, sum(l["summary"]["length"] for l in trip["legs"])
 
 
-# ---------- paso 1: /route (troceado) ----------
-def route_through(points):
-    """points: [{'lat','lon'}]. Devuelve (coords[[lon,lat]], km) o {'error'}."""
-    locs = [{"lat": p["lat"], "lon": p["lon"]} for p in points]
+def hav(a, b):
+    R = 6371
+    dlat = math.radians(b[1] - a[1])
+    dlon = math.radians(b[0] - a[0])
+    h = (math.sin(dlat / 2) ** 2 + math.cos(math.radians(a[1]))
+         * math.cos(math.radians(b[1])) * math.sin(dlon / 2) ** 2)
+    return 2 * R * math.asin(math.sqrt(h))
+
+
+def length_km(c):
+    return sum(hav(c[i], c[i + 1]) for i in range(len(c) - 1))
+
+
+def _bearing(a, b):
+    y = math.sin(math.radians(b[0] - a[0])) * math.cos(math.radians(b[1]))
+    x = (math.cos(math.radians(a[1])) * math.sin(math.radians(b[1]))
+         - math.sin(math.radians(a[1])) * math.cos(math.radians(b[1]))
+         * math.cos(math.radians(b[0] - a[0])))
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def count_uturns(coords):
+    """nº de retrocesos (>150°), muestreando cada ~80 m para ignorar ruido."""
+    s = [coords[0]]
+    for c in coords[1:]:
+        if hav(s[-1], c) * 1000 > 80:
+            s.append(c)
+    n = 0
+    for i in range(1, len(s) - 1):
+        d = abs(_bearing(s[i - 1], s[i]) - _bearing(s[i], s[i + 1]))
+        if min(d, 360 - d) > 150:
+            n += 1
+    return n
+
+
+def match_trace(coords):
+    """map-match de un trazado [[lon,lat]] → (coords, km, costing) o None."""
+    shape = [{"lat": c[1], "lon": c[0]} for c in coords]
+    for costing in COSTINGS:
+        d = post("/trace_route", {"shape": shape, "costing": costing,
+                                  "shape_match": "map_snap"})
+        if "trip" in d:
+            cc, km = legs_to_coords(d["trip"])
+            return cc, km, costing
+    return None
+
+
+def route_stops(stops):
+    """respaldo: routing por paradas en orden (chunked) → (coords, km)."""
+    locs = [{"lat": s["lat"], "lon": s["lon"]} for s in stops]
+    chunks = ([locs] if len(locs) <= 20
+              else [locs[i:i + 20] for i in range(0, len(locs), 19)])
     coords, km = [], 0.0
-    chunks = ([locs] if len(locs) <= MAX_LOC
-              else [locs[i:i + MAX_LOC] for i in range(0, len(locs), MAX_LOC - 1)])
-    for chunk in chunks:
-        if len(chunk) < 2:
+    for ch in chunks:
+        if len(ch) < 2:
             continue
-        d = post("/route", {"locations": chunk, "costing": COSTING,
+        d = post("/route", {"locations": ch, "costing": "auto",
                             "directions_options": {"units": "kilometers"}})
-        if "error" in d:
-            return {"error": d["error"]}
-        for leg in d["trip"]["legs"]:
-            dec = decode_polyline(leg["shape"])
-            if coords:
-                dec = dec[1:]               # quitar solape
-            coords += dec
-        km += d["trip"]["summary"]["length"]
-    return {"coords": coords, "km": km}
+        if "trip" not in d:
+            return None
+        cc, k = legs_to_coords(d["trip"])
+        coords += cc[1:] if coords else cc
+        km += k
+    return (coords, km) if coords else None
 
 
-# ---------- paso 2: /trace_attributes (way_ids) ----------
 def trace_wayids(coords):
-    """coords [[lon,lat]] -> (way_ids únicos, nombres de calle únicos)."""
     step = max(1, len(coords) // 100)
     sampled = [{"lat": c[1], "lon": c[0]} for c in coords[::step]]
     if sampled and (sampled[-1]["lat"], sampled[-1]["lon"]) != (coords[-1][1], coords[-1][0]):
         sampled.append({"lat": coords[-1][1], "lon": coords[-1][0]})
-    d = post("/trace_attributes", {
-        "shape": sampled, "costing": COSTING, "shape_match": "map_snap",
-        "filters": {"attributes": ["edge.way_id", "edge.names", "edge.length"],
-                    "action": "include"}})
+    d = post("/trace_attributes", {"shape": sampled, "costing": "bus",
+             "shape_match": "map_snap",
+             "filters": {"attributes": ["edge.way_id", "edge.names"], "action": "include"}})
     if "error" in d:
-        return [], [], d["error"]
+        d = post("/trace_attributes", {"shape": sampled, "costing": "auto",
+                 "shape_match": "map_snap",
+                 "filters": {"attributes": ["edge.way_id", "edge.names"], "action": "include"}})
     way_ids, names, prev = [], [], None
     for e in d.get("edges", []):
         wid = e.get("way_id")
@@ -117,65 +170,88 @@ def trace_wayids(coords):
         for nm in e.get("names", []):
             if nm not in names:
                 names.append(nm)
-    return way_ids, names, None
+    return way_ids, names
 
 
-# ---------- agrupar paradas por ruta+sentido ----------
-def load_groups(filter_ref=None):
+def stops_by_route(filter_ref):
     fc = json.loads(STOPS.read_text())
-    groups = defaultdict(list)
+    g = defaultdict(list)
     for f in fc["features"]:
         p = f["properties"]
         if filter_ref and p["route_ref"] != filter_ref:
             continue
-        key = (p["route_ref"], p["route_name"], p.get("direction") or "")
         lon, lat = f["geometry"]["coordinates"]
-        groups[key].append({"seq": p.get("stop_seq"), "lat": lat, "lon": lon,
-                            "name": p.get("stop_name")})
-    # ordenar cada grupo por secuencia (los None al final, preservando orden)
-    for k in groups:
-        groups[k].sort(key=lambda s: (s["seq"] is None, s["seq"] if s["seq"] is not None else 0))
-    return groups
+        g[p["route_ref"]].append({"seq": p.get("stop_seq"), "lat": lat, "lon": lon})
+    for k in g:
+        g[k].sort(key=lambda s: (s["seq"] is None, s["seq"] or 0))
+    return g
 
 
 def main():
     filter_ref = sys.argv[1] if len(sys.argv) > 1 else None
-    groups = load_groups(filter_ref)
-    if not groups:
-        print(f"Sin paradas para {filter_ref!r}.")
-        return
+    shapes = json.loads(SHAPES.read_text())
+    route_stops_map = stops_by_route(filter_ref)
+    print(f"VALHALLA_URL = {VALHALLA_URL}\n")
+    print(f"{'TRAZADO':<42}{'MÉTODO':<12}{'KM':>7}{'U-turn':>8}  REVISAR")
 
     features = []
-    print(f"VALHALLA_URL = {VALHALLA_URL}\n")
-    for (ref, name, direction), stops in sorted(groups.items()):
-        label = f"{ref} {name}" + (f" [{direction}]" if direction else "")
-        if len(stops) < 2:
-            print(f"⚠️  {label}: {len(stops)} parada(s), se omite (sin trazado posible)")
+    for f in shapes["features"]:
+        p = f["properties"]
+        ref = p["route_ref"]
+        if filter_ref and ref != filter_ref:
             continue
-        r = route_through(stops)
-        if "error" in r:
-            print(f"❌ {label}: {r['error']}")
+        kc = f["geometry"]["coordinates"]
+        label = f"{ref} {p['route_name']} / {p['shape_name']}"[:40]
+
+        method, result = None, None
+        if len(kc) >= MIN_VERTS:
+            m = match_trace(kc)
+            if m:
+                result = (m[0], m[1])
+                method = f"match:{m[2]}"
+        if result is None:                       # respaldo por paradas
+            rs = route_stops_map.get(ref, [])
+            if len(rs) >= 2:
+                r = route_stops(rs)
+                if r:
+                    result = r
+                    method = "stops:auto"
+        if result is None:
+            print(f"{label:<42}{'—':<12}{'—':>7}{'—':>8}  ❌ sin geometría")
             continue
-        way_ids, names, terr = trace_wayids(r["coords"])
-        print(f"✅ {label}: {len(stops)} paradas → {r['km']:.2f} km · "
-              f"{len(r['coords'])} pts · {len(way_ids)} ways OSM"
-              + (f" · trace: {terr}" if terr else ""))
-        if names:
-            print(f"     calles: {', '.join(names[:6])}{' …' if len(names) > 6 else ''}")
+
+        coords, km = result
+        ut = count_uturns(coords)
+        kml_km = length_km(kc) if len(kc) >= 2 else 0
+        # marcar revisión: muchas U-turns, o gran diferencia con el KML
+        revisar = []
+        if ut > 0:
+            revisar.append(f"{ut} U-turn")
+        if kml_km and abs(km - kml_km) / kml_km > 0.20:
+            revisar.append(f"Δlong {abs(km-kml_km)/kml_km*100:.0f}%")
+        if len(kc) < MIN_VERTS:
+            revisar.append("trazado roto")
+        flag = "⚠️ " + ", ".join(revisar) if revisar else "✓"
+        print(f"{label:<42}{method:<12}{km:>7.2f}{ut:>8}  {flag}")
+
+        way_ids, names = trace_wayids(coords)
         features.append({
             "type": "Feature",
-            "geometry": {"type": "LineString", "coordinates": r["coords"]},
+            "geometry": {"type": "LineString", "coordinates": coords},
             "properties": {
-                "route_ref": ref, "route_name": name, "direction": direction,
-                "n_stops": len(stops), "distance_km": round(r["km"], 3),
-                "n_points": len(r["coords"]), "osm_way_ids": way_ids,
-                "osm_streets": names,
+                "route_ref": ref, "route_name": p["route_name"],
+                "shape_name": p["shape_name"], "method": method,
+                "distance_km": round(km, 3), "n_points": len(coords),
+                "uturns": ut, "review": revisar,
+                "osm_way_ids": way_ids, "osm_streets": names,
             },
         })
 
     OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features},
                               ensure_ascii=False, indent=1))
     print(f"\n→ {OUT}  ({len(features)} trazado(s))")
+    n_rev = sum(1 for f in features if f["properties"]["review"])
+    print(f"   {n_rev} trazado(s) marcados para revisión manual.")
 
 
 if __name__ == "__main__":

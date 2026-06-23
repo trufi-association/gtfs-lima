@@ -1,75 +1,64 @@
 # Fase 2.5 — Snap-to-roads con Valhalla
 
-> Cómo usamos el motor **Valhalla** (servicio de Trufi/BusBoy) para convertir las paradas y
-> trazados del KML en geometría limpia pegada a las calles reales de OpenStreetMap.
-> Fecha: 2026-06-23.
+> Convierte los trazados del KML en geometría limpia pegada a las calles reales de OpenStreetMap,
+> usando el motor **Valhalla** de Trufi/BusBoy (`VALHALLA_URL`, sin Mapbox). Fecha: 2026-06-23.
 
-## Para qué sirve
+## Enfoque: map-match del trazado (no routing entre paradas)
 
-El KML traía trazados con problemas (ETUCHISA roto en fragmentos, URBANITO sin retorno, geometría
-imprecisa). Valhalla resuelve esto: dadas las **paradas en orden**, calcula el recorrido **siguiendo
-las calles reales** y nos devuelve dos cosas a la vez:
+El primer intento conectaba las **paradas** con `/route` (costing auto). Resultado: Valhalla rutea
+"como un carro" y mete **rodeos y vueltas en U** (ej. URBANITO se iba por Av. Guillermo Dansey en un
+rectángulo que no existe en la ruta). Ver `img/urbanito-snap.jpeg` (azul, con el rodeo).
 
-1. **Geometría pegada a la calle** → futura `shapes.txt` del GTFS.
-2. **Los `way_id` de OpenStreetMap** por donde pasa la ruta → insumo para mapear en OSM PTv2 (Fase 3).
+**Corrección** — hacer **map-matching del trazado dibujado** (`/trace_route`, `shape_match: map_snap`,
+`costing: bus`): pega la *forma* del KML a las calles **sin inventar desvíos**. Bonus: cada LineString
+del KML ya es un **sentido** (ida/vuelta), así que esto **resuelve también el sentido** sin depender
+del campo `direction` (que solo traía LA 50).
 
-Reutilizamos el **mismo motor que tp-routes/BusBoy** (`VALHALLA_URL`), no dependemos de Mapbox.
+Comparación en URBANITO (`img/urbanito-fix.jpeg`, verde = corregido):
 
-## Endpoint
+| Método | Puntos | Longitud | Vueltas en U |
+|---|---|---|---|
+| KML original | 87 | 18.60 km | 0 |
+| Snap por paradas (auto) | 540 | 16.93 km (−9%) | 1 ⚠️ |
+| **Map-match + bus** | 591 | 19.00 km (+2%) | **0** ✅ |
 
-`VALHALLA_URL=https://valhalla.busboy.app` (ver `.env.example`). Cobertura: **Colombia, Bolivia y
-Lima (Perú)**. Lima se añadió el 2026-06-23 (recorte OSM del bbox de las rutas).
+## Script: `scripts/snap_valhalla.py`
 
-> La administración del servidor (cómo se actualizan los mapas, rollback) está documentada en la
-> carpeta privada de gestión, no en este repo público.
+Para cada trazado del KML: `/trace_route` (bus→auto) → geometría limpia; respaldo a routing por
+paradas si el trazado es muy corto/roto; `/trace_attributes` → `osm_way_ids` + `osm_streets`.
+**Auto-marca para revisión** (campo `review`) cuando detecta vueltas en U, diferencia de longitud
+>20 % con el KML, o trazado roto.
 
-## Receta (dos pasos, igual que `tp-routes/js/valhalla.js`)
-
-**Paso 1 — `/route`**: trazado siguiendo calles entre los puntos.
-```json
-POST /route
-{ "locations": [{"lat":-12.0502,"lon":-77.0776}, {"lat":-12.0476,"lon":-77.0410}],
-  "costing": "auto",
-  "directions_options": {"units":"kilometers"} }
 ```
-La geometría viene como **polilínea codificada (precisión 6)** en `trip.legs[].shape` → hay que
-decodificarla. Si hay >~20 puntos, se trocea en chunks solapados (1 punto de solape).
-
-**Paso 2 — `/trace_attributes`** (`shape_match: map_snap`): pega la geometría a OSM y devuelve los
-`way_id` + nombres de calle.
-```json
-POST /trace_attributes
-{ "shape": [...muestreo de la geometría del paso 1...],
-  "costing": "auto", "shape_match": "map_snap",
-  "filters": {"attributes":["edge.way_id","edge.names","edge.length"],"action":"include"} }
+VALHALLA_URL=https://valhalla.busboy.app python3 scripts/snap_valhalla.py        # todas
+VALHALLA_URL=https://valhalla.busboy.app python3 scripts/snap_valhalla.py R-9605 # una
 ```
+Salida: `data/osm/shapes_snapped.geojson` (LineString por trazado + `method`, `distance_km`,
+`uturns`, `review`, `osm_way_ids`, `osm_streets`).
 
-**Verificado en Lima (2026-06-23):** una traza sobre Av. Óscar Benavides devolvió 7 edges y Valhalla
-reconoció la calle real *"Avenida Óscar Raimundo Benavides"* — justo el corredor de la ruta URBANITO.
+## Resultado (13 trazados, 2026-06-23)
 
-## Notas / cuidados
+- ✅ **Limpios:** URBANITO · NUEVA AMERICA (ida/vuelta) · AERODIRECTO NORTE retorno.
+- ⚠️ **A revisar (datos de origen incompletos, no fallo del algoritmo):**
+  - **ETUCHISA A1/A3/A4** — fragmentos de 3 vértices en el KML → el respaldo por paradas mezcla
+    sentidos (150 km, 26 U-turns). **Pedir trazado completo al cliente.**
+  - **AERODIRECTO CENTRO/NORTE IDA, LA 50** — trazados cortos/incompletos en el KML (Δlongitud alta).
 
-- `costing: "auto"` respeta sentidos de calle (one-way), correcto para buses. Valhalla también tiene
-  `costing: "bus"` si hiciera falta afinar.
-- Valhalla **propone**, nosotros **validamos**: siempre comparar el trazado snapped contra el
-  LineString del KML; donde difieran mucho, revisar a mano (puede haber corredores exclusivos o
-  giros que el routing automático no adivina).
-- Para rutas con trazado roto/faltante en el KML, el recorrido se reconstruye **desde las paradas**.
+## Las 3 palancas de corrección
 
-## Estado
+1. **Map-match + `bus`** (automático) — corrige rodeos y vueltas en U del algoritmo. ✅ aplicado.
+2. **Marcado automático** — el script señala qué revisar y por qué. ✅
+3. **Corrección manual / pedir datos** — trazados rotos en el KML no se arreglan solos: o se dibujan
+   a mano en un editor (tp-routes / GTFS·X, ver `03_evaluacion_editor_gtfs.md`) o se piden a Juan Prado.
 
-- [x] **`scripts/snap_valhalla.py`** — por ruta+sentido, paradas en orden → `/route` +
-      `/trace_attributes` → `data/osm/shapes_snapped.geojson` (geometría + `osm_way_ids` + `osm_streets`).
-      Uso: `VALHALLA_URL=… python3 scripts/snap_valhalla.py [REF]`.
-- [x] **Probado con R-9605 URBANITO**: 47 paradas → 16.9 km, 540 puntos, 146 ways OSM.
-      Validación contra el KML: desviación **mediana 16 m** (sigue el recorrido), **p90 1275 m**
-      (un tramo al oeste donde Valhalla difiere — a revisar a mano). Ver `img/urbanito-snap.jpeg`.
+## Cuidados
 
-![URBANITO: KML vs snapped](img/urbanito-snap.jpeg)
+- `costing: bus` respeta lógica de bus y sentidos de calle. Si el server no lo soporta, cae a `auto`.
+- Valhalla **propone**, nosotros **validamos**: revisar siempre los trazados marcados ⚠️.
 
 ## Próximo
 
-- [ ] Correr el resto de rutas; revisar a mano los tramos con desviación alta (p90).
-- [ ] Resolver el sentido de las paradas donde no es explícito (solo LA 50 lo trae) — asignación por
-      proximidad al trazado, en la Fase 3 (OSM). Para rutas multi-sentido sin `direction`
-      (NUEVA AMERICA, ETUCHISA) el snap actual mezcla sentidos: separar antes de snappear.
+- [ ] Mejorar el respaldo de ETUCHISA: separar paradas por sentido antes del fallback (no mezclar).
+- [ ] Pedir a Juan Prado: trazado completo de ETUCHISA y los IDA de AERODIRECTO; retorno de URBANITO.
+- [ ] Asignar cada parada a su trazado (sentido) por proximidad — Fase 3 (OSM).
+- [ ] Revisar/corregir a mano los trazados ⚠️ en un editor visual.
