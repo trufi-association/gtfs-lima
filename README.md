@@ -21,7 +21,9 @@ gtfs_lima/
 ├── docs/
 │   ├── 00_analisis_kml.md    ← análisis del KML fuente
 │   ├── 01_pipeline.md        ← plan de trabajo KML → OSM → GTFS
-│   └── 02_normalizacion.md   ← resultado de la Fase 1
+│   ├── 02_normalizacion.md   ← resultado de la Fase 1
+│   ├── 03_evaluacion_editor_gtfs.md  ← tp-routes vs GTFS·X vs alternativas + recomendación
+│   └── img/                  ← evidencia (capturas de la prueba en vivo de GTFS·X)
 └── scripts/
     └── normalize.py          ← Fase 1: KML → modelo único (GeoJSON/CSV)
 ```
